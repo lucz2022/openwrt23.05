@@ -116,17 +116,27 @@ jobs:
         find dl -size -1024c -exec rm -f {} \;
     - name: Check space after download
       run: df -hT
+      
     - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        export TMPDIR="$TMPDIR"
-        make -j"$(nproc)" DL_DIR="$DL_DIR" || make -j1 DL_DIR="$DL_DIR" || make -j1 V=s DL_DIR="$DL_DIR"
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        # 首次并行
+        make -j"$(nproc)" BUILD_LOG=1 || true
+        # 若失败，串行+超详细日志（能把 package/install 的“Collision/Conflicts/duplicate”打印出来）
+        make -j1 V=sc BUILD_LOG=1 || make -j1 V=s BUILD_LOG=1
+        echo "status=success" >> $GITHUB_OUTPUT || true
+
+    - name: Dump last 300 lines of build logs
+      if: failure()
+      run: |
+          cd openwrt
+          echo "==== tail build logs ===="
+          tail -n 300 -q $(find logs -type f -name '*.log' | sort | tail -n 5) || true
+          echo "==== grep common errors ===="
+          grep -R -nE 'Collision|collides|File exists|Cannot satisfy the following dependencies|package/install' logs/ || true
+
 
     - name: Check space usage
       if: (!cancelled())

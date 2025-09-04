@@ -1,74 +1,205 @@
-#!/bin/bash
-# ================================================
-# diy-part2.sh  —— OpenWrt 二次配置（feeds 安装后执行）
-# 1) 锁定 x86_64
-# 2) 禁用 mosdns
-# 3) 禁用 shadowsocks-libev 全家（避免 PCRE1 依赖链）
-# 4) 启用 ucode / ucode-mod-digest
-# 5) make defconfig 展开依赖
-# 6) 守卫：检查是否误拉回 ss-libev（默认只告警；STRICT_GUARD=1 时中断）
-# ================================================
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+#
+# File: .github/workflows/openwrt-bulder.yml
+# Description: Build OpenWrt using GitHub Actions
+#
+# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
 
-set -eux
+name: OpenWrt23.05 Builder
 
-# 如果当前目录不是 openwrt/，且存在 openwrt/ 目录，则切进去
-[ -d openwrt ] && cd openwrt
+on:
+repository_dispatch:
+workflow_dispatch:
 
-# 确保存在 .config（如果你在上一步把 openwrt.config 拷到 openwrt/.config，这里就会直接用）
-[ -f .config ] || touch .config
+env:
+REPO_URL: https://github.com/openwrt/openwrt
+REPO_BRANCH: openwrt-23.05   # 这是分支名，没问题；若固定版本则用 v23.05.5（tag）
+FEEDS_CONF: feeds.conf.default
+CONFIG_FILE: openwrt.config
+DIY_P1_SH: diy-part1.sh
+DIY_P2_SH: diy-part2.sh
+UPLOAD_BIN_DIR: false
+UPLOAD_FIRMWARE: true
+UPLOAD_RELEASE: true
+TZ: Asia/Shanghai
 
-echo "[diy2] Lock target to x86_64"
-# 1) 只保留 x86_64 目标，清理历史目标项
-sed -i '/^CONFIG_TARGET_/d' .config
-cat >> .config <<'EOF'
-CONFIG_TARGET_x86=y
-CONFIG_TARGET_x86_64=y
-CONFIG_TARGET_x86_64_DEVICE_generic=y
-EOF
+jobs:
+build:
+runs-on: ubuntu-22.04
 
-echo "[diy2] Disable mosdns and its menu include"
-# 2) 关闭 mosdns（部分环境会编译失败）
-sed -i '/^CONFIG_PACKAGE_mosdns[ =]/d;/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS[ =]/d' .config
-cat >> .config <<'EOF'
-# CONFIG_PACKAGE_mosdns is not set
-# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS is not set
-EOF
+steps:
+- name: Checkout
+uses: actions/checkout@main
+- name: Free disk space (aggressive)
+run: |
+       echo "Before cleanup:" && df -hT
+       sudo rm -rf /usr/share/dotnet \
+                   /usr/local/lib/android \
+                   /opt/ghc \
+                   /opt/hostedtoolcache/CodeQL \
+                   /opt/hostedtoolcache/go \
+                   /opt/hostedtoolcache/Python \
+                   /opt/hostedtoolcache/Ruby || true
+       sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+       sudo docker system prune -af || true
+       sudo rm -rf /home/runner/work/_temp || true
+       sudo apt-get clean || true
+       echo "After cleanup:" && df -hT
 
-echo "[diy2] Hard-disable shadowsocks-libev family to avoid PCRE1 chain"
-# 3) 明确禁用 SS-libev（不要和 SSRR 混淆）
-sed -i '/^CONFIG_PACKAGE_shadowsocks-libev/d;/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_/d' .config
-cat >> .config <<'EOF'
-# CONFIG_PACKAGE_shadowsocks-libev-config is not set
-# CONFIG_PACKAGE_shadowsocks-libev-ss-local is not set
-# CONFIG_PACKAGE_shadowsocks-libev-ss-redir is not set
-# CONFIG_PACKAGE_shadowsocks-libev-ss-rules is not set
-# CONFIG_PACKAGE_shadowsocks-libev-ss-server is not set
-# CONFIG_PACKAGE_shadowsocks-libev-ss-tunnel is not set
-# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client is not set
-# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Server is not set
-EOF
+   - name: Initialization environment
+env:
+DEBIAN_FRONTEND: noninteractive
+run: |
+       sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+       sudo docker image prune --all --force
+       sudo -E apt-get -qq update
+       sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+       sudo -E apt-get -qq autoremove --purge
+       sudo -E apt-get -qq clean
+       sudo timedatectl set-timezone "$TZ"
+       sudo mkdir -p /workdir
+       sudo chown $USER:$GROUPS /workdir
 
-echo "[diy2] Ensure ucode & ucode-mod-digest present"
-# 4) 一些插件（如 homeproxy 等）需要 ucode + ucode-mod-digest
-sed -i '/^CONFIG_PACKAGE_ucode/d;/^CONFIG_PACKAGE_ucode-mod-digest/d' .config
-cat >> .config <<'EOF'
-CONFIG_PACKAGE_ucode=y
-CONFIG_PACKAGE_ucode-mod-digest=y
-EOF
+   - name: Clone source code
+working-directory: /workdir
+run: |
+       df -hT $PWD
+       git clone $REPO_URL -b $REPO_BRANCH openwrt
+       ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-# 5) 展开依赖
-echo "[diy2] make defconfig..."
-make defconfig
+   - name: Load custom feeds
+run: |
+       [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+       chmod +x $DIY_P1_SH
+       cd openwrt
+       $GITHUB_WORKSPACE/$DIY_P1_SH
 
-# 6) 守卫（检查最终 .config 是否真的启用了 ss-libev；默认仅告警，不中断）
-STRICT_GUARD="${STRICT_GUARD:-0}"  # 环境变量设为 1 可改为严格模式
-if grep -Eq '^(CONFIG_PACKAGE_shadowsocks-libev(-[a-z0-9_]+)?=y|CONFIG_PACKAGE_shadowsocks-libev(-[a-z0-9_]+)?=m)' .config; then
-  echo "[diy2][WARNING] shadowsocks-libev **已被启用**，很可能被某个面板(feed)联动拉入。"
-  echo "[diy2][WARNING] 请关闭 passwall/ssr-plus/bypass 中的 INCLUDE_Shadowsocks_Libev* 选项，或移除相应 feed。"
-  if [ "$STRICT_GUARD" = "1" ]; then
-    echo "[diy2][ERROR] STRICT_GUARD=1，终止构建。"
-    exit 1
-  fi
-fi
+   - name: Update feeds
+run: cd openwrt && ./scripts/feeds update -a
 
-echo "[diy2] Done."
+- name: Install feeds
+run: cd openwrt && ./scripts/feeds install -a
+- name: Add TurboACC
+run: |
+       cd openwrt
+       curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh -o add_turboacc.sh
+       bash add_turboacc.sh
+       
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+
+   - name: Load custom configuration
+run: |
+       [ -e files ] && mv files openwrt/files
+       [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+       chmod +x $DIY_P2_SH
+       cd openwrt
+       $GITHUB_WORKSPACE/$DIY_P2_SH
+   
+- name: Prepare tmp and dl
+run: |
+       sudo mkdir -p /workdir/tmp /workdir/dl
+       sudo chown $USER:$GROUPS /workdir/tmp /workdir/dl
+       echo "TMPDIR=/workdir/tmp" >> $GITHUB_ENV
+       echo "DL_DIR=/workdir/dl"   >> $GITHUB_ENV
+       df -hT /workdir
+   - name: Download package
+id: package
+run: |
+       cd openwrt
+       make defconfig
+       # 将 dl 目录指向 /workdir/dl，避免占满系统盘
+       ln -sfn "$DL_DIR" dl
+       make download -j8
+       find dl -size -1024c -exec rm -f {} \;
+   - name: Check space after download
+run: df -hT
+- name: Compile the firmware
+id: compile
+run: |
+       cd openwrt
+       echo -e "$(nproc) thread compile"
+       export TMPDIR="$TMPDIR"
+       make -j"$(nproc)" DL_DIR="$DL_DIR" || make -j1 DL_DIR="$DL_DIR" || make -j1 V=s DL_DIR="$DL_DIR"
+       echo "status=success" >> $GITHUB_OUTPUT
+       grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+       [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+       echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+   - name: Check space usage
+if: (!cancelled())
+run: df -hT
+
+- name: Upload bin directory
+uses: actions/upload-artifact@main
+if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+with:
+name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+path: openwrt/bin
+
+- name: Organize files
+id: organize
+if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+run: |
+       set -e
+       if ls openwrt/bin/targets/*/* >/dev/null 2>&1; then
+         cd openwrt/bin/targets/*/*
+         rm -rf packages
+         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+         echo "status=success" >> $GITHUB_OUTPUT
+       else
+         echo "No targets output found."
+         echo "status=skip" >> $GITHUB_OUTPUT
+       fi
+
+   - name: Upload firmware directory
+uses: actions/upload-artifact@main
+if: steps.organize.outputs.status == 'success' && !cancelled()
+with:
+name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+path: ${{ env.FIRMWARE }}
+
+- name: Generate release tag
+id: tag
+if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+run: |
+       echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+       touch release.txt
+       [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
+       echo "status=success" >> $GITHUB_OUTPUT
+
+   - name: Upload firmware to release
+uses: softprops/action-gh-release@master
+if: steps.tag.outputs.status == 'success' && !cancelled()
+env:
+GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+with:
+tag_name: ${{ steps.tag.outputs.release_tag }}
+body_path: release.txt
+files: ${{ env.FIRMWARE }}/*
+
+- name: Delete workflow runs
+uses: Mattraks/delete-workflow-runs@main
+with:
+retain_days: 0
+keep_minimum_runs: 2
+
+- name: Remove old Releases
+uses: dev-drprasad/delete-older-releases@master
+if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+with:
+keep_latest: 3
+delete_tags: true
+env:
+GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,184 @@
+name: LEDE x86_64 (SSR-only + LuCI)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master          # 基于 23.05 系列，适配 SSR Plus 最好
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Free disk
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache || true
+        sudo docker system prune -af || true
+        df -hT
+
+    - name: Add 16G Swap
+      run: |
+        sudo fallocate -l 16G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Init build env
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint \
+          bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler \
+          fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged \
+          help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev \
+          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev \
+          libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs ninja-build \
+          p7zip-full patch pkgconf python3-setuptools qemu-utils rsync scons \
+          squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip wget xxd zlib1g-dev
+
+    - name: Clone source
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        echo "DL_DIR=/workdir/dl"   >> $GITHUB_ENV
+        echo "TMPDIR=/workdir/tmp"  >> $GITHUB_ENV
+        sudo mkdir -p /workdir/dl /workdir/tmp
+        sudo chown $USER:$GROUPS /workdir/dl /workdir/tmp
+
+    - name: Feeds
+      working-directory: openwrt
+      run: |
+        # 使用 lede 自带 feeds，别混第三方
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Write .config (SSR-only)
+      working-directory: openwrt
+      run: |
+        cat > .config <<'EOF'
+        CONFIG_TARGET_x86=y
+        CONFIG_TARGET_x86_64=y
+        CONFIG_TARGET_x86_64_DEVICE_generic=y
+
+        # 镜像类型（按需保留）
+        CONFIG_GRUB_IMAGES=y
+        CONFIG_QCOW2_IMAGES=y
+        CONFIG_ISO_IMAGES=y
+        CONFIG_TARGET_IMAGES_GZIP=y
+        CONFIG_TARGET_ROOTFS_SQUASHFS=y
+        CONFIG_TARGET_ROOTFS_EXT4FS=y
+
+        # LuCI 基础
+        CONFIG_PACKAGE_luci=y
+        CONFIG_PACKAGE_luci-compat=y
+        CONFIG_PACKAGE_luci-app-opkg=y
+        CONFIG_LUCI_LANG_zh_Hans=y
+
+        # PPPoE
+        CONFIG_PACKAGE_ppp=y
+        CONFIG_PACKAGE_ppp-mod-pppoe=y
+        CONFIG_PACKAGE_luci-proto-ppp=y
+
+        # DNS：只留 dnsmasq-full，避免与 dnsmasq 冲突
+        # CONFIG_PACKAGE_dnsmasq is not set
+        CONFIG_PACKAGE_dnsmasq-full=y
+
+        # 防火墙：firewall4 + nft（LEDE 现在默认支持）
+        CONFIG_PACKAGE_firewall4=y
+        CONFIG_PACKAGE_nftables=y
+        CONFIG_PACKAGE_kmod-nft-nat=y
+        CONFIG_PACKAGE_kmod-nft-offload=y
+        # 关闭 legacy iptables 族，避免冲突
+        # CONFIG_PACKAGE_kmod-ipt-nat is not set
+        # CONFIG_PACKAGE_iptables-legacy is not set
+        # CONFIG_PACKAGE_iptables-mod-tproxy is not set
+        # CONFIG_PACKAGE_iptables-mod-extra is not set
+
+        # —— 核心：SSR Plus 仅客户端（ShadowsocksR Libev），不要任何 server/其它协议 ——
+        CONFIG_PACKAGE_luci-app-ssr-plus=y
+        CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y
+
+        # 仅保留 SSRR 客户端
+        CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y
+        CONFIG_PACKAGE_shadowsocksr-libev-ssr-redir=y
+        CONFIG_PACKAGE_shadowsocksr-libev-ssr-local=y
+
+        # 关闭一切 server/其它协议选项（不存在也没关系）
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server is not set
+        # CONFIG_PACKAGE_shadowsocksr-libev-ssr-server is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Server is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Trojan is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_SingBox is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Hysteria is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_NaiveProxy is not set
+        # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Simple_Obfs is not set
+
+        # 避免误选巨物或 Rust 生态
+        # CONFIG_ALL_KMODS is not set
+        # CONFIG_ALL_PACKAGES is not set
+        # CONFIG_PACKAGE_ripgrep is not set
+        # CONFIG_PACKAGE_bottom is not set
+        # CONFIG_PACKAGE_dns2socks-rust is not set
+        # CONFIG_PACKAGE_aardvark-dns is not set
+        # CONFIG_PACKAGE_python-cryptography is not set
+        # CONFIG_PACKAGE_python-bcrypt is not set
+        # CONFIG_PACKAGE_librsvg is not set
+        EOF
+
+        # 再兜底：即使 feeds/脚本动了，也强制只留 dnsmasq-full、关 server/其它协议
+        sed -i \
+          -e 's/^CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' \
+          -e 's/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y/# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray is not set/' \
+          -e 's/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y/# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server is not set/' \
+          -e 's/^CONFIG_PACKAGE_shadowsocksr-libev-ssr-server=y/# CONFIG_PACKAGE_shadowsocksr-libev-ssr-server is not set/' \
+          -e 's/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client=y/# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client is not set/' \
+          .config
+
+        make defconfig
+
+    - name: Download dl
+      working-directory: openwrt
+      run: |
+        ln -sfn "$DL_DIR" dl
+        make download -j8
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Build (serial, verbose)
+      working-directory: openwrt
+      run: |
+        echo "1 thread compile (safe mode)"
+        export TMPDIR="$TMPDIR"
+        make -j1 V=sc || make -j1 V=s
+
+    - name: Collect
+      if: always()
+      run: |
+        if ls openwrt/bin/targets/*/* >/dev/null 2>&1; then
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        fi
+
+    - name: Upload firmware
+      if: env.FIRMWARE
+      uses: actions/upload-artifact@v4
+      with:
+        name: lede-ssr-only-x86_64
+        path: ${{ env.FIRMWARE }}/*
+
+    - name: Release (optional)
+      if: env.FIRMWARE
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: lede-ssr-only
+        files: ${{ env.FIRMWARE }}/*

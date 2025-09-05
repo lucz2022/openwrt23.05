@@ -1,4 +1,4 @@
-name: LEDE x86_64 (SSR-only + LuCI)
+name: LEDE x86_64 (SSR-only + TurboACC)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master          # 基于 23.05 系列，适配 SSR Plus 最好
+  REPO_BRANCH: master
   TZ: Asia/Shanghai
 
 jobs:
@@ -56,11 +56,10 @@ jobs:
     - name: Feeds
       working-directory: openwrt
       run: |
-        # 使用 lede 自带 feeds，别混第三方
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Write .config (SSR-only)
+    - name: Write .config (SSR-only + TurboACC)
       working-directory: openwrt
       run: |
         cat > .config <<'EOF'
@@ -68,7 +67,7 @@ jobs:
         CONFIG_TARGET_x86_64=y
         CONFIG_TARGET_x86_64_DEVICE_generic=y
 
-        # 镜像类型（按需保留）
+        # 输出镜像（按需保留）
         CONFIG_GRUB_IMAGES=y
         CONFIG_QCOW2_IMAGES=y
         CONFIG_ISO_IMAGES=y
@@ -87,31 +86,27 @@ jobs:
         CONFIG_PACKAGE_ppp-mod-pppoe=y
         CONFIG_PACKAGE_luci-proto-ppp=y
 
-        # DNS：只留 dnsmasq-full，避免与 dnsmasq 冲突
+        # DNS：只留 dnsmasq-full（避免与 dnsmasq 冲突）
         # CONFIG_PACKAGE_dnsmasq is not set
         CONFIG_PACKAGE_dnsmasq-full=y
 
-        # 防火墙：firewall4 + nft（LEDE 现在默认支持）
+        # 防火墙走 firewall4 + nft
         CONFIG_PACKAGE_firewall4=y
         CONFIG_PACKAGE_nftables=y
         CONFIG_PACKAGE_kmod-nft-nat=y
         CONFIG_PACKAGE_kmod-nft-offload=y
-        # 关闭 legacy iptables 族，避免冲突
         # CONFIG_PACKAGE_kmod-ipt-nat is not set
         # CONFIG_PACKAGE_iptables-legacy is not set
         # CONFIG_PACKAGE_iptables-mod-tproxy is not set
         # CONFIG_PACKAGE_iptables-mod-extra is not set
 
-        # —— 核心：SSR Plus 仅客户端（ShadowsocksR Libev），不要任何 server/其它协议 ——
+        # —— 核心：SSR Plus（仅 ShadowsocksR Libev 客户端） ——
         CONFIG_PACKAGE_luci-app-ssr-plus=y
         CONFIG_PACKAGE_luci-i18n-ssr-plus-zh-cn=y
-
-        # 仅保留 SSRR 客户端
         CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y
         CONFIG_PACKAGE_shadowsocksr-libev-ssr-redir=y
         CONFIG_PACKAGE_shadowsocksr-libev-ssr-local=y
-
-        # 关闭一切 server/其它协议选项（不存在也没关系）
+        # 禁止一切 server / 其它协议（保持纯 SSR 客户端 GUI）
         # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server is not set
         # CONFIG_PACKAGE_shadowsocksr-libev-ssr-server is not set
         # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client is not set
@@ -123,7 +118,15 @@ jobs:
         # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_NaiveProxy is not set
         # CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Simple_Obfs is not set
 
-        # 避免误选巨物或 Rust 生态
+        # —— TurboACC（不含 FULLCONE，先保稳） ——
+        CONFIG_PACKAGE_luci-app-turboacc=y
+        CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_OFFLOADING=y
+        CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_BBR_CCA=y
+        CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_PDNSD=y
+        # CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_NFT_FULLCONE is not set
+        # CONFIG_PACKAGE_kmod-nft-fullcone is not set
+
+        # 防止误选体积大/需要 Rust 的包
         # CONFIG_ALL_KMODS is not set
         # CONFIG_ALL_PACKAGES is not set
         # CONFIG_PACKAGE_ripgrep is not set
@@ -135,13 +138,14 @@ jobs:
         # CONFIG_PACKAGE_librsvg is not set
         EOF
 
-        # 再兜底：即使 feeds/脚本动了，也强制只留 dnsmasq-full、关 server/其它协议
+        # 兜底再清一次潜在冲突
         sed -i \
           -e 's/^CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' \
           -e 's/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y/# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray is not set/' \
           -e 's/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y/# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server is not set/' \
           -e 's/^CONFIG_PACKAGE_shadowsocksr-libev-ssr-server=y/# CONFIG_PACKAGE_shadowsocksr-libev-ssr-server is not set/' \
-          -e 's/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client=y/# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev_Client is not set/' \
+          -e 's/^CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_NFT_FULLCONE=y/# CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_NFT_FULLCONE is not set/' \
+          -e 's/^CONFIG_PACKAGE_kmod-nft-fullcone=y/# CONFIG_PACKAGE_kmod-nft-fullcone is not set/' \
           .config
 
         make defconfig
@@ -173,12 +177,12 @@ jobs:
       if: env.FIRMWARE
       uses: actions/upload-artifact@v4
       with:
-        name: lede-ssr-only-x86_64
+        name: lede-ssr-only-turboacc-x86_64
         path: ${{ env.FIRMWARE }}/*
 
     - name: Release (optional)
       if: env.FIRMWARE
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: lede-ssr-only
+        tag_name: lede-ssr-only-turboacc
         files: ${{ env.FIRMWARE }}/*
